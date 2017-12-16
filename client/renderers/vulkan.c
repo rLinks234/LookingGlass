@@ -226,14 +226,15 @@ static bool create_image_views(struct LGR_Vulkan * this);
 
 static bool create_instance(struct LGR_Vulkan * this)
 {
-  VkApplicationInfo appInfo;
-  memset(&appInfo, 0, sizeof(VkApplicationInfo));
-  appInfo.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-  appInfo.pApplicationName   = "Looking Glass";
-  appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-  appInfo.pEngineName        = "No Engine";
-  appInfo.engineVersion      = VK_MAKE_VERSION(1, 0, 0);
-  appInfo.apiVersion         = VK_API_VERSION_1_0;
+  VkApplicationInfo appInfo =
+  {
+    .sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+    .pApplicationName   = "Looking Glass",
+    .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+    .pEngineName        = "No Engine",
+    .engineVersion      = VK_MAKE_VERSION(1, 0, 0),
+    .apiVersion         = VK_API_VERSION_1_0
+  };
 
   const char * extensionNames[2] =
   {
@@ -245,14 +246,15 @@ static bool create_instance(struct LGR_Vulkan * this)
   {
   };
 
-  VkInstanceCreateInfo createInfo;
-  memset(&createInfo, 0, sizeof(VkInstanceCreateInfo));
-  createInfo.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-  createInfo.pApplicationInfo        = &appInfo;
-  createInfo.enabledExtensionCount   = 2;
-  createInfo.ppEnabledExtensionNames = extensionNames;
-  createInfo.enabledLayerCount       = 0;
-  createInfo.ppEnabledLayerNames     = layerNames;
+  VkInstanceCreateInfo createInfo =
+  {
+    .sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+    .pApplicationInfo        = &appInfo,
+    .enabledExtensionCount   = 2,
+    .ppEnabledExtensionNames = extensionNames,
+    .enabledLayerCount       = 0,
+    .ppEnabledLayerNames     = layerNames
+  };
 
   if (vkCreateInstance(&createInfo, NULL, &this->instance) != VK_SUCCESS)
   {
@@ -561,14 +563,15 @@ static bool create_logical_device(struct LGR_Vulkan * this)
 
   const char * extensions[1] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
-  VkDeviceCreateInfo createInfo;
-  memset(&createInfo, 0, sizeof(VkDeviceCreateInfo));
-  createInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-  createInfo.pQueueCreateInfos       = queueInfo;
-  createInfo.queueCreateInfoCount    = 2;
-  createInfo.pEnabledFeatures        = &features;
-  createInfo.enabledExtensionCount   = 1;
-  createInfo.ppEnabledExtensionNames = extensions;
+  VkDeviceCreateInfo createInfo =
+  {
+    .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+    .pQueueCreateInfos       = queueInfo,
+    .queueCreateInfoCount    = 2,
+    .pEnabledFeatures        = &features,
+    .enabledExtensionCount   = 1,
+    .ppEnabledExtensionNames = extensions
+  };
 
   if (vkCreateDevice(this->physicalDevice, &createInfo, NULL, &this->device) != VK_SUCCESS)
   {
@@ -629,21 +632,22 @@ static bool create_swapchain(struct LGR_Vulkan * this, int w, int h)
   else {if (this->extent.height < caps.minImageExtent.height) this->extent.height = caps.minImageExtent.height;}
   DEBUG_INFO("Buffer Extent : %ux%u", this->extent.width, this->extent.height);
 
-  VkSwapchainCreateInfoKHR createInfo;
-  memset(&createInfo, 0, sizeof(VkSwapchainCreateInfoKHR));
-  createInfo.sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-  createInfo.surface          = this->surface;
-  createInfo.minImageCount    = caps.minImageCount;
-  createInfo.imageFormat      = VK_FORMAT_B8G8R8A8_UNORM;
-  createInfo.imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-  createInfo.imageExtent      = this->extent;
-  createInfo.imageArrayLayers = 1;
-  createInfo.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-  createInfo.preTransform     = caps.currentTransform;
-  createInfo.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-  createInfo.presentMode      = this->presentMode;
-  createInfo.clipped          = VK_TRUE;
-  createInfo.oldSwapchain     = VK_NULL_HANDLE;
+  VkSwapchainCreateInfoKHR createInfo =
+  {
+    .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+    .surface          = this->surface,
+    .minImageCount    = caps.minImageCount,
+    .imageFormat      = VK_FORMAT_B8G8R8A8_UNORM,
+    .imageColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+    .imageExtent      = this->extent,
+    .imageArrayLayers = 1,
+    .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+    .preTransform     = caps.currentTransform,
+    .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+    .presentMode      = this->presentMode,
+    .clipped          = VK_TRUE,
+    .oldSwapchain     = VK_NULL_HANDLE
+  };
 
   uint32_t queueFamily[2] = { this->queues.graphics, this->queues.present };
   if (queueFamily[0] == queueFamily[1])

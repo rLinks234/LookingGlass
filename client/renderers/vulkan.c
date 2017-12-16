@@ -44,14 +44,11 @@ QueueIndicies;
 struct LGR_Vulkan
 {
   LG_RendererParams params;
+  LG_RendererFormat format;
   bool              configured;
 
-  bool              freeInstance;
   VkInstance        instance;
-
-  bool              freeSurface;
   VkSurfaceKHR      surface;
-  bool              freeDevice;
   VkDevice          device;
   VkPresentModeKHR  presentMode;
 
@@ -59,10 +56,10 @@ struct LGR_Vulkan
   QueueIndicies     queues;
   VkQueue           graphics_q;
   VkQueue           present_q;
+  bool              chainCreated;
 
   VkExtent2D        extent;
-  bool              freeSwapchain;
-  VkSwapchainKHR    swapchain;
+  VkSwapchainKHR    swapChain;
   uint32_t          imageCount;
   VkImage         * images;
   VkImageView     * views;
@@ -73,6 +70,8 @@ struct LGR_Vulkan
   VkFramebuffer   * framebuffers;
   VkCommandPool     commandPool;
   VkCommandBuffer * commandBuffers;
+  VkSemaphore       semImageAvailable;
+  VkSemaphore       semRenderFinished;
 };
 
 //=============================================================================
@@ -122,14 +121,15 @@ bool lgr_vulkan_configure(void * opaque, SDL_Window *window, const LG_RendererFo
     return false;
   }
 
-  int w, h;
-  SDL_GetWindowSize(window, &w, &h);
+  memcpy(&this->format, &format, sizeof(LG_RendererFormat));
+  int x, y;
+  SDL_GetWindowSize(window, &x, &y);
 
   this->configured =
     create_surface       (this, window) &&
     pick_physical_device (this) &&
     create_logical_device(this) &&
-    create_chain         (this, w, h);
+    create_chain         (this, x, y);
 
   return this->configured;
 }
@@ -142,16 +142,16 @@ void lgr_vulkan_deconfigure(void * opaque)
 
   delete_chain(this);
 
-  if (this->freeDevice)
+  if (this->device)
   {
     vkDestroyDevice(this->device, NULL);
-    this->freeDevice = false;
+    this->device = NULL;
   }
 
-  if (this->freeSurface)
+  if (this->surface)
   {
     vkDestroySurfaceKHR(this->instance, this->surface, NULL);
-    this->freeSurface = false;
+    this->surface = NULL;
   }
 
   this->configured = false;
@@ -163,10 +163,12 @@ void lgr_vulkan_deinitialize(void * opaque)
   if (!this)
     return;
 
+  delete_chain(this);
+
   if (this->configured)
     lgr_vulkan_deconfigure(opaque);
 
-  if (this->freeInstance)
+  if (this->instance)
     vkDestroyInstance(this->instance, NULL);
 
   free(this);
@@ -178,7 +180,7 @@ bool lgr_vulkan_is_compatible(void * opaque, const LG_RendererFormat format)
   if (!this || !this->configured)
     return false;
 
-  return false;
+  return (memcmp(&this->format, &format, sizeof(LG_RendererFormat)) == 0);
 }
 
 void lgr_vulkan_on_resize(void * opaque, const int width, const int height, const LG_RendererRect destRect)
@@ -200,7 +202,7 @@ bool lgr_vulkan_on_mouse_shape(void * opaque, const LG_RendererCursor cursor, co
   if (!this || !this->configured)
     return false;
 
-  return false;
+  return true;
 }
 
 bool lgr_vulkan_on_mouse_event(void * opaque, const bool visible , const int x, const int y)
@@ -209,7 +211,7 @@ bool lgr_vulkan_on_mouse_event(void * opaque, const bool visible , const int x, 
   if (!this || !this->configured)
     return false;
 
-  return false;
+  return true;
 }
 
 bool lgr_vulkan_on_frame_event(void * opaque, const uint8_t * data)
@@ -218,7 +220,7 @@ bool lgr_vulkan_on_frame_event(void * opaque, const uint8_t * data)
   if (!this || !this->configured)
     return false;
 
-  return false;
+  return true;
 }
 
 bool lgr_vulkan_render(void * opaque)
@@ -227,7 +229,84 @@ bool lgr_vulkan_render(void * opaque)
   if (!this || !this->configured)
     return false;
 
-  return false;
+  uint32_t imageIndex;
+  bool ok = false;
+  for(int retry = 0; retry < 2; ++retry)
+  {
+    vkQueueWaitIdle(this->present_q);
+    switch(vkAcquireNextImageKHR(this->device, this->swapChain, 1e6, this->semImageAvailable, VK_NULL_HANDLE, &imageIndex))
+    {
+      case VK_SUCCESS:
+        ok = true;
+        break;
+
+      case VK_TIMEOUT:
+        DEBUG_ERROR("Acquire next image timeout");
+        return false;
+
+      case VK_NOT_READY:
+        DEBUG_ERROR("Acquire next image not ready");
+        return false;
+
+      case VK_SUBOPTIMAL_KHR:
+        DEBUG_INFO("Suboptimal, recreating the chain");
+        delete_chain(this);
+        if (!create_chain(this, this->extent.width, this->extent.height))
+          return false;
+        break;
+
+      default:
+        DEBUG_ERROR("Acquire next image failed");
+        return false;
+    }
+
+    if (ok)
+      break;
+  }
+
+  if (!ok)
+  {
+    DEBUG_ERROR("Retry limit exceeded");
+    return false;
+  }
+
+  VkSemaphore          waitSemaphores[] = { this->semImageAvailable };
+  VkSemaphore          doneSemaphores[] = { this->semRenderFinished };
+  VkPipelineStageFlags waitStages[]     = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+  VkSubmitInfo         submitInfo       = {
+    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+    .waitSemaphoreCount   = 1,
+    .pWaitSemaphores      = waitSemaphores,
+    .pWaitDstStageMask    = waitStages,
+    .commandBufferCount   = 1,
+    .pCommandBuffers      = &this->commandBuffers[imageIndex],
+    .signalSemaphoreCount = 1,
+    .pSignalSemaphores    = doneSemaphores
+  };
+
+  if (vkQueueSubmit(this->graphics_q, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Failed to submit the draw command buffer");
+  }
+
+  VkSwapchainKHR   swapChains[] = { this->swapChain };
+  VkPresentInfoKHR presentInfo  =
+  {
+    .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+    .waitSemaphoreCount = 1,
+    .pWaitSemaphores    = doneSemaphores,
+    .swapchainCount     = 1,
+    .pSwapchains        = swapChains,
+    .pImageIndices      = &imageIndex
+  };
+
+  if (vkQueuePresentKHR(this->present_q, &presentInfo) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Queue present failed");
+    return false;
+  }
+
+  return true;
 }
 
 const LG_Renderer LGR_Vulkan =
@@ -285,7 +364,6 @@ static bool create_instance(struct LGR_Vulkan * this)
     return false;
   }
 
-  this->freeInstance = true;
   return true;
 }
 
@@ -333,7 +411,6 @@ static bool create_surface(struct LGR_Vulkan * this, SDL_Window * window)
       return false;
   }
 
-  this->freeSurface = true;
   return true;
 }
 
@@ -400,7 +477,7 @@ static bool pick_physical_device(struct LGR_Vulkan * this)
     if (!complete)
       continue;
 
-    // ensure the device supports swapchain
+    // ensure the device supports swapChain
     uint32_t extensionCount;
     vkEnumerateDeviceExtensionProperties(pd, NULL, &extensionCount, NULL);
     if (!extensionCount)
@@ -601,7 +678,6 @@ static bool create_logical_device(struct LGR_Vulkan * this)
     DEBUG_ERROR("Failed to create the logical device");
     return false;
   }
-  this->freeDevice = true;
 
   vkGetDeviceQueue(this->device, this->queues.graphics, 0, &this->graphics_q);
   vkGetDeviceQueue(this->device, this->queues.present , 0, &this->present_q );
@@ -610,32 +686,51 @@ static bool create_logical_device(struct LGR_Vulkan * this)
 
 //=============================================================================
 //
-// Lower recreatable swapchain level
+// Lower recreatable swapChain level
 //
 //=============================================================================
 
-static bool create_swapchain      (struct LGR_Vulkan * this, int w, int h);
+static bool create_swap_chain      (struct LGR_Vulkan * this, int w, int h);
 static bool create_image_views    (struct LGR_Vulkan * this);
 static bool create_render_pass    (struct LGR_Vulkan * this);
 static bool create_pipeline       (struct LGR_Vulkan * this);
 static bool create_framebuffers   (struct LGR_Vulkan * this);
 static bool create_command_buffers(struct LGR_Vulkan * this);
+static bool create_semaphores     (struct LGR_Vulkan * this);
 
 static bool create_chain(struct LGR_Vulkan * this, int w, int h)
 {
-  vkDeviceWaitIdle(this->device);
-  delete_chain(this);
+  this->chainCreated =
+    create_swap_chain     (this, w, h) &&
+    create_image_views    (this) &&
+    create_render_pass    (this) &&
+    create_pipeline       (this) &&
+    create_framebuffers   (this) &&
+    create_command_buffers(this) &&
+    create_semaphores     (this);
 
-  return create_swapchain      (this, w, h) &&
-         create_image_views    (this) &&
-         create_render_pass    (this) &&
-         create_pipeline       (this) &&
-         create_framebuffers   (this) &&
-         create_command_buffers(this);
+  return this->chainCreated;
 }
 
 static void delete_chain(struct LGR_Vulkan * this)
 {
+  if (!this->chainCreated)
+    return;
+
+  vkDeviceWaitIdle(this->device);
+
+  if (this->semRenderFinished)
+  {
+    vkDestroySemaphore(this->device, this->semRenderFinished, NULL);
+    this->semRenderFinished = NULL;
+  }
+
+  if (this->semImageAvailable)
+  {
+    vkDestroySemaphore(this->device, this->semImageAvailable, NULL);
+    this->semImageAvailable = NULL;
+  }
+
   if (this->commandBuffers)
   {
     free(this->commandBuffers);
@@ -653,7 +748,8 @@ static void delete_chain(struct LGR_Vulkan * this)
     for(uint32_t i = 0; i < this->framebufferCount; ++i)
       vkDestroyFramebuffer(this->device, this->framebuffers[i], NULL);
     free(this->framebuffers);
-    this->framebuffers = NULL;
+    this->framebuffers     = NULL;
+    this->framebufferCount = 0;
   }
 
   if (this->pipeline)
@@ -688,14 +784,16 @@ static void delete_chain(struct LGR_Vulkan * this)
     this->images = NULL;
   }
 
-  if (this->freeSwapchain)
+  if (this->swapChain)
   {
-    vkDestroySwapchainKHR(this->device, this->swapchain, NULL);
-    this->freeSwapchain = NULL;
+    vkDestroySwapchainKHR(this->device, this->swapChain, NULL);
+    this->swapChain = NULL;
   }
+
+  this->chainCreated = false;
 }
 
-static bool create_swapchain(struct LGR_Vulkan * this, int w, int h)
+static bool create_swap_chain(struct LGR_Vulkan * this, int w, int h)
 {
   VkSurfaceCapabilitiesKHR caps;
   vkGetPhysicalDeviceSurfaceCapabilitiesKHR(this->physicalDevice, this->surface, &caps);
@@ -739,22 +837,21 @@ static bool create_swapchain(struct LGR_Vulkan * this, int w, int h)
     createInfo.pQueueFamilyIndices   = queueFamily;
   }
 
-  if (vkCreateSwapchainKHR(this->device, &createInfo, NULL, &this->swapchain) != VK_SUCCESS)
+  if (vkCreateSwapchainKHR(this->device, &createInfo, NULL, &this->swapChain) != VK_SUCCESS)
   {
     DEBUG_ERROR("Failed to create the swap chain");
     return false;
   }
-  this->freeSwapchain = true;
 
-  vkGetSwapchainImagesKHR(this->device, this->swapchain, &this->imageCount, NULL);
+  vkGetSwapchainImagesKHR(this->device, this->swapChain, &this->imageCount, NULL);
   if (!this->imageCount)
   {
-    DEBUG_ERROR("No swapchain images");
+    DEBUG_ERROR("No swapChain images");
     return false;
   }
 
   this->images = (VkImage *)malloc(sizeof(VkImage) * this->imageCount);
-  vkGetSwapchainImagesKHR(this->device, this->swapchain, &this->imageCount, this->images);
+  vkGetSwapchainImagesKHR(this->device, this->swapChain, &this->imageCount, this->images);
   DEBUG_INFO("Images        : %d", this->imageCount);
 
   return true;
@@ -1080,9 +1177,27 @@ static bool create_command_buffers(struct LGR_Vulkan * this)
 
     if (vkEndCommandBuffer(this->commandBuffers[i]) != VK_SUCCESS)
     {
-      DEBUG_ERROR("failed to record to command buffer!");
+      DEBUG_ERROR("Failed to record to the command buffer");
       return false;
     }
+  }
+
+  return true;
+}
+
+static bool create_semaphores(struct LGR_Vulkan * this)
+{
+  VkSemaphoreCreateInfo createInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
+  };
+
+  if (
+    (vkCreateSemaphore(this->device, &createInfo, NULL, &this->semImageAvailable) != VK_SUCCESS) ||
+    (vkCreateSemaphore(this->device, &createInfo, NULL, &this->semRenderFinished) != VK_SUCCESS)
+  ) {
+    DEBUG_ERROR("Failed to create the semaphores");
+    return false;
   }
 
   return true;

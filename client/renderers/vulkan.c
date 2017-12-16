@@ -860,7 +860,6 @@ static bool create_swap_chain(struct LGR_Vulkan * this, int w, int h)
 
         if (this->extent.height > caps.maxImageExtent.height) this->extent.height = caps.maxImageExtent.height;
   else {if (this->extent.height < caps.minImageExtent.height) this->extent.height = caps.minImageExtent.height;}
-  DEBUG_INFO("Buffer Extent : %ux%u", this->extent.width, this->extent.height);
 
   VkSwapchainCreateInfoKHR createInfo =
   {
@@ -906,7 +905,6 @@ static bool create_swap_chain(struct LGR_Vulkan * this, int w, int h)
 
   this->images = (VkImage *)malloc(sizeof(VkImage) * this->imageCount);
   vkGetSwapchainImagesKHR(this->device, this->swapChain, &this->imageCount, this->images);
-  DEBUG_INFO("Images        : %d", this->imageCount);
 
   return true;
 }

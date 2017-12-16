@@ -69,6 +69,8 @@ struct LGR_Vulkan
   VkRenderPass      renderPass;
   VkPipelineLayout  pipelineLayout;
   VkPipeline        pipeline;
+  uint32_t          framebufferCount;
+  VkFramebuffer   * framebuffers;
 };
 
 //=============================================================================
@@ -610,24 +612,34 @@ static bool create_logical_device(struct LGR_Vulkan * this)
 //
 //=============================================================================
 
-static bool create_swapchain  (struct LGR_Vulkan * this, int w, int h);
-static bool create_image_views(struct LGR_Vulkan * this);
-static bool create_render_pass(struct LGR_Vulkan * this);
-static bool create_pipeline   (struct LGR_Vulkan * this);
+static bool create_swapchain   (struct LGR_Vulkan * this, int w, int h);
+static bool create_image_views (struct LGR_Vulkan * this);
+static bool create_render_pass (struct LGR_Vulkan * this);
+static bool create_pipeline    (struct LGR_Vulkan * this);
+static bool create_framebuffers(struct LGR_Vulkan * this);
 
 static bool create_chain(struct LGR_Vulkan * this, int w, int h)
 {
   vkDeviceWaitIdle(this->device);
   delete_chain(this);
 
-  return create_swapchain  (this, w, h) &&
-         create_image_views(this) &&
-         create_render_pass(this) &&
-         create_pipeline   (this);
+  return create_swapchain   (this, w, h) &&
+         create_image_views (this) &&
+         create_render_pass (this) &&
+         create_pipeline    (this) &&
+         create_framebuffers(this);
 }
 
 static void delete_chain(struct LGR_Vulkan * this)
 {
+  if (this->framebuffers)
+  {
+    for(uint32_t i = 0; i < this->framebufferCount; ++i)
+      vkDestroyFramebuffer(this->device, this->framebuffers[i], NULL);
+    free(this->framebuffers);
+    this->framebuffers = NULL;
+  }
+
   if (this->pipeline)
   {
     vkDestroyPipeline(this->device, this->pipeline, NULL);
@@ -957,5 +969,32 @@ static bool create_pipeline(struct LGR_Vulkan * this)
   }
 
   vkDestroyShaderModule(this->device, vertexShader, NULL);
+  return true;
+}
+
+static bool create_framebuffers(struct LGR_Vulkan * this)
+{
+  VkFramebufferCreateInfo createInfo =
+  {
+    .sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+    .renderPass      = this->renderPass,
+    .attachmentCount = 1,
+    .width           = this->extent.width,
+    .height          = this->extent.height,
+    .layers          = 1
+  };
+
+  this->framebuffers = (VkFramebuffer *)malloc(sizeof(VkFramebuffer) * this->imageCount);
+  for(uint32_t i = 0; i < this->imageCount; ++i)
+  {
+    createInfo.pAttachments = &this->views[i];
+    if (vkCreateFramebuffer(this->device, &createInfo, NULL, &this->framebuffers[i]) != VK_SUCCESS)
+    {
+      DEBUG_ERROR("Failed to create a framebuffer");
+      return false;
+    }
+    ++this->framebufferCount;
+  }
+
   return true;
 }

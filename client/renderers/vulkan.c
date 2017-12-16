@@ -47,6 +47,10 @@ struct LGR_Vulkan
   LG_RendererFormat format;
   bool              configured;
 
+  bool              resize;
+  int               resizeWidth;
+  int               resizeHeight;
+
   VkInstance        instance;
   VkSurfaceKHR      surface;
   VkDevice          device;
@@ -59,7 +63,7 @@ struct LGR_Vulkan
   bool              chainCreated;
 
   VkExtent2D        extent;
-  VkSwapchainKHR    swapChain;
+  VkSwapchainKHR    swapChain, oldSwapChain;
   uint32_t          imageCount;
   VkImage         * images;
   VkImageView     * views;
@@ -85,6 +89,7 @@ static bool pick_physical_device (struct LGR_Vulkan * this);
 static bool create_logical_device(struct LGR_Vulkan * this);
 static bool create_chain         (struct LGR_Vulkan * this, int w, int h);
 static void delete_chain         (struct LGR_Vulkan * this);
+static bool recreate_chain       (struct LGR_Vulkan * this, int w, int h);
 
 const char * lgr_vulkan_get_name()
 {
@@ -189,11 +194,12 @@ void lgr_vulkan_on_resize(void * opaque, const int width, const int height, cons
   if (!this || !this->configured)
     return;
 
-  if (this->extent.width != width || this->extent.height != height)
-  {
-    delete_chain(this);
-    create_chain(this, width, height);
-  }
+  if (this->extent.width == width || this->extent.height == height)
+    return;
+
+  this->resize       = true;
+  this->resizeWidth  = width;
+  this->resizeHeight = height;
 }
 
 bool lgr_vulkan_on_mouse_shape(void * opaque, const LG_RendererCursor cursor, const int width, const int height, const int pitch, const uint8_t * data)
@@ -229,6 +235,16 @@ bool lgr_vulkan_render(void * opaque)
   if (!this || !this->configured)
     return false;
 
+  if (this->resize)
+  {
+    if (!recreate_chain(this, this->resizeWidth, this->resizeHeight))
+    {
+      DEBUG_ERROR("resize failed");
+      return false;
+    }
+    this->resize = false;
+  }
+
   uint32_t imageIndex;
   bool ok = false;
   for(int retry = 0; retry < 2; ++retry)
@@ -248,10 +264,9 @@ bool lgr_vulkan_render(void * opaque)
         DEBUG_ERROR("Acquire next image not ready");
         return false;
 
+      case VK_ERROR_OUT_OF_DATE_KHR:
       case VK_SUBOPTIMAL_KHR:
-        DEBUG_INFO("Suboptimal, recreating the chain");
-        delete_chain(this);
-        if (!create_chain(this, this->extent.width, this->extent.height))
+        if (!recreate_chain(this, this->extent.width, this->extent.height))
           return false;
         break;
 
@@ -266,7 +281,7 @@ bool lgr_vulkan_render(void * opaque)
 
   if (!ok)
   {
-    DEBUG_ERROR("Retry limit exceeded");
+    DEBUG_ERROR("retry count exceeded");
     return false;
   }
 
@@ -287,6 +302,7 @@ bool lgr_vulkan_render(void * opaque)
   if (vkQueueSubmit(this->graphics_q, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
   {
     DEBUG_ERROR("Failed to submit the draw command buffer");
+    return false;
   }
 
   VkSwapchainKHR   swapChains[] = { this->swapChain };
@@ -300,10 +316,12 @@ bool lgr_vulkan_render(void * opaque)
     .pImageIndices      = &imageIndex
   };
 
-  if (vkQueuePresentKHR(this->present_q, &presentInfo) != VK_SUCCESS)
+  vkQueuePresentKHR(this->present_q, &presentInfo);
+
+  if (this->oldSwapChain)
   {
-    DEBUG_ERROR("Queue present failed");
-    return false;
+    vkDestroySwapchainKHR(this->device, this->oldSwapChain, NULL);
+    this->oldSwapChain = NULL;
   }
 
   return true;
@@ -690,11 +708,13 @@ static bool create_logical_device(struct LGR_Vulkan * this)
 //
 //=============================================================================
 
-static bool create_swap_chain      (struct LGR_Vulkan * this, int w, int h);
+static void reset_swap_chain      (struct LGR_Vulkan * this);
+static bool create_swap_chain     (struct LGR_Vulkan * this, int w, int h);
 static bool create_image_views    (struct LGR_Vulkan * this);
 static bool create_render_pass    (struct LGR_Vulkan * this);
 static bool create_pipeline       (struct LGR_Vulkan * this);
 static bool create_framebuffers   (struct LGR_Vulkan * this);
+static bool create_command_pool   (struct LGR_Vulkan * this);
 static bool create_command_buffers(struct LGR_Vulkan * this);
 static bool create_semaphores     (struct LGR_Vulkan * this);
 
@@ -706,8 +726,25 @@ static bool create_chain(struct LGR_Vulkan * this, int w, int h)
     create_render_pass    (this) &&
     create_pipeline       (this) &&
     create_framebuffers   (this) &&
+    create_command_pool   (this) &&
     create_command_buffers(this) &&
     create_semaphores     (this);
+
+  return this->chainCreated;
+}
+
+static bool recreate_chain(struct LGR_Vulkan * this, int w, int h)
+{
+  vkDeviceWaitIdle(this->device);
+  reset_swap_chain(this);
+
+  this->chainCreated =
+    create_swap_chain     (this, w, h) &&
+    create_image_views    (this) &&
+    create_render_pass    (this) &&
+    create_pipeline       (this) &&
+    create_framebuffers   (this) &&
+    create_command_buffers(this);
 
   return this->chainCreated;
 }
@@ -718,6 +755,7 @@ static void delete_chain(struct LGR_Vulkan * this)
     return;
 
   vkDeviceWaitIdle(this->device);
+  reset_swap_chain(this);
 
   if (this->semRenderFinished)
   {
@@ -743,6 +781,17 @@ static void delete_chain(struct LGR_Vulkan * this)
     this->commandPool = NULL;
   }
 
+  if (this->images)
+  {
+    free(this->images);
+    this->images = NULL;
+  }
+
+  this->chainCreated = false;
+}
+
+static void reset_swap_chain(struct LGR_Vulkan * this)
+{
   if (this->framebuffers)
   {
     for(uint32_t i = 0; i < this->framebufferCount; ++i)
@@ -751,6 +800,13 @@ static void delete_chain(struct LGR_Vulkan * this)
     this->framebuffers     = NULL;
     this->framebufferCount = 0;
   }
+
+  vkFreeCommandBuffers(
+    this->device,
+    this->commandPool,
+    this->imageCount,
+    this->commandBuffers
+  );
 
   if (this->pipeline)
   {
@@ -778,10 +834,10 @@ static void delete_chain(struct LGR_Vulkan * this)
     this->views = NULL;
   }
 
-  if (this->images)
+  if (this->oldSwapChain)
   {
-    free(this->images);
-    this->images = NULL;
+    vkDestroySwapchainKHR(this->device, this->oldSwapChain, NULL);
+    this->oldSwapChain = NULL;
   }
 
   if (this->swapChain)
@@ -789,8 +845,6 @@ static void delete_chain(struct LGR_Vulkan * this)
     vkDestroySwapchainKHR(this->device, this->swapChain, NULL);
     this->swapChain = NULL;
   }
-
-  this->chainCreated = false;
 }
 
 static bool create_swap_chain(struct LGR_Vulkan * this, int w, int h)
@@ -822,7 +876,7 @@ static bool create_swap_chain(struct LGR_Vulkan * this, int w, int h)
     .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
     .presentMode      = this->presentMode,
     .clipped          = VK_TRUE,
-    .oldSwapchain     = VK_NULL_HANDLE
+    .oldSwapchain     = this->oldSwapChain
   };
 
   uint32_t queueFamily[2] = { this->queues.graphics, this->queues.present };
@@ -1112,7 +1166,7 @@ static bool create_framebuffers(struct LGR_Vulkan * this)
   return true;
 }
 
-static bool create_command_buffers(struct LGR_Vulkan * this)
+static bool create_command_pool(struct LGR_Vulkan * this)
 {
   VkCommandPoolCreateInfo poolInfo =
   {
@@ -1127,6 +1181,11 @@ static bool create_command_buffers(struct LGR_Vulkan * this)
     return false;
   }
 
+  return true;
+}
+
+static bool create_command_buffers(struct LGR_Vulkan * this)
+{
   this->commandBuffers = (VkCommandBuffer *)malloc(sizeof(VkCommandBuffer) * this->imageCount);
   VkCommandBufferAllocateInfo bufferInfo =
   {

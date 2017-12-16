@@ -55,6 +55,7 @@ struct LGR_Vulkan
   uint32_t          imageCount;
   VkImage         * images;
   VkImageView     * views;
+  VkRenderPass      renderPass;
 };
 
 //=============================================================================
@@ -593,6 +594,7 @@ static bool create_logical_device(struct LGR_Vulkan * this)
 
 static bool create_swapchain  (struct LGR_Vulkan * this, int w, int h);
 static bool create_image_views(struct LGR_Vulkan * this);
+static bool create_render_pass(struct LGR_Vulkan * this);
 
 static bool create_chain(struct LGR_Vulkan * this, int w, int h)
 {
@@ -600,11 +602,18 @@ static bool create_chain(struct LGR_Vulkan * this, int w, int h)
   delete_chain(this);
 
   return create_swapchain  (this, w, h) &&
-         create_image_views(this);
+         create_image_views(this) &&
+         create_render_pass(this);
 }
 
 static void delete_chain(struct LGR_Vulkan * this)
 {
+  if (this->renderPass)
+  {
+    vkDestroyRenderPass(this->device, this->renderPass, NULL);
+    this->renderPass = NULL;
+  }
+
   if (this->views)
   {
     for(int i = 0; i < this->imageCount; ++i)
@@ -722,6 +731,51 @@ static bool create_image_views(struct LGR_Vulkan * this)
       this->views = NULL;
       return false;
     }
+  }
+
+  return true;
+}
+
+static bool create_render_pass(struct LGR_Vulkan * this)
+{
+  VkAttachmentDescription colorAttachment =
+  {
+    .format         = VK_FORMAT_B8G8R8A8_UNORM,
+    .samples        = VK_SAMPLE_COUNT_1_BIT,
+    .loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR,
+    .storeOp        = VK_ATTACHMENT_STORE_OP_STORE,
+    .stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+    .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+    .initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED,
+    .finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+  };
+
+  VkAttachmentReference colorAttachmentRef =
+  {
+    .attachment = 0,
+    .layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+  };
+
+  VkSubpassDescription subpass =
+  {
+    .pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS,
+    .colorAttachmentCount = 1,
+    .pColorAttachments    = &colorAttachmentRef
+  };
+
+  VkRenderPassCreateInfo createInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+    .attachmentCount = 1,
+    .pAttachments    = &colorAttachment,
+    .subpassCount    = 1,
+    .pSubpasses      = &subpass
+  };
+
+  if (vkCreateRenderPass(this->device, &createInfo, NULL, &this->renderPass) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Failed to create the render pass");
+    return false;
   }
 
   return true;

@@ -183,6 +183,11 @@ void lgr_vulkan_on_resize(void * opaque, const int width, const int height, cons
   if (!this || !this->configured)
     return;
 
+  if (this->extent.width != width || this->extent.height != height)
+  {
+    delete_chain(this);
+    create_chain(this, width, height);
+  }
 }
 
 bool lgr_vulkan_on_mouse_shape(void * opaque, const LG_RendererCursor cursor, const int width, const int height, const int pitch, const uint8_t * data)

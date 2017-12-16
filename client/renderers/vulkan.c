@@ -1045,5 +1045,45 @@ static bool create_command_buffers(struct LGR_Vulkan * this)
     return false;
   }
 
+  VkCommandBufferBeginInfo beginInfo =
+  {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    .flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
+  };
+
+  VkClearValue clearColor = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
+
+  VkRenderPassBeginInfo renderPassInfo =
+  {
+    .sType      = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+    .renderPass = this->renderPass,
+    .renderArea =
+    {
+      .offset = {0, 0},
+      .extent = this->extent
+    },
+    .clearValueCount = 1,
+    .pClearValues    = &clearColor
+  };
+
+  for(uint32_t i = 0; i < this->imageCount; ++i)
+  {
+    vkBeginCommandBuffer(this->commandBuffers[i], &beginInfo);
+
+      renderPassInfo.framebuffer = this->framebuffers[i];
+      vkCmdBeginRenderPass(this->commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+        vkCmdBindPipeline(this->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, this->pipeline);
+        vkCmdDraw(this->commandBuffers[i], 3, 1, 0, 0);
+
+      vkCmdEndRenderPass(this->commandBuffers[i]);
+
+    if (vkEndCommandBuffer(this->commandBuffers[i]) != VK_SUCCESS)
+    {
+      DEBUG_ERROR("failed to record to command buffer!");
+      return false;
+    }
+  }
+
   return true;
 }

@@ -57,7 +57,11 @@ struct LGR_Vulkan
   VkImageView     * views;
 };
 
-// forwards
+//=============================================================================
+//
+// Forwards for top level vulkan initialization and teardown
+//
+//=============================================================================
 static bool create_instance      (struct LGR_Vulkan * this);
 static bool create_surface       (struct LGR_Vulkan * this, SDL_Window * window);
 static bool pick_physical_device (struct LGR_Vulkan * this);
@@ -218,11 +222,7 @@ const LG_Renderer LGR_Vulkan =
   .render         = lgr_vulkan_render
 };
 
-
-// forwards
-static bool create_swapchain  (struct LGR_Vulkan * this, int w, int h);
-static bool create_image_views(struct LGR_Vulkan * this);
-
+// vulkan internals
 
 static bool create_instance(struct LGR_Vulkan * this)
 {
@@ -584,6 +584,15 @@ static bool create_logical_device(struct LGR_Vulkan * this)
   vkGetDeviceQueue(this->device, this->queues.present , 0, &this->present_q );
   return true;
 }
+
+//=============================================================================
+//
+// Lower recreatable swapchain level
+//
+//=============================================================================
+
+static bool create_swapchain  (struct LGR_Vulkan * this, int w, int h);
+static bool create_image_views(struct LGR_Vulkan * this);
 
 static bool create_chain(struct LGR_Vulkan * this, int w, int h)
 {

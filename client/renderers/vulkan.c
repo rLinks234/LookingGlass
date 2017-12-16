@@ -71,6 +71,8 @@ struct LGR_Vulkan
   VkPipeline        pipeline;
   uint32_t          framebufferCount;
   VkFramebuffer   * framebuffers;
+  VkCommandPool     commandPool;
+  VkCommandBuffer * commandBuffers;
 };
 
 //=============================================================================
@@ -612,26 +614,40 @@ static bool create_logical_device(struct LGR_Vulkan * this)
 //
 //=============================================================================
 
-static bool create_swapchain   (struct LGR_Vulkan * this, int w, int h);
-static bool create_image_views (struct LGR_Vulkan * this);
-static bool create_render_pass (struct LGR_Vulkan * this);
-static bool create_pipeline    (struct LGR_Vulkan * this);
-static bool create_framebuffers(struct LGR_Vulkan * this);
+static bool create_swapchain      (struct LGR_Vulkan * this, int w, int h);
+static bool create_image_views    (struct LGR_Vulkan * this);
+static bool create_render_pass    (struct LGR_Vulkan * this);
+static bool create_pipeline       (struct LGR_Vulkan * this);
+static bool create_framebuffers   (struct LGR_Vulkan * this);
+static bool create_command_buffers(struct LGR_Vulkan * this);
 
 static bool create_chain(struct LGR_Vulkan * this, int w, int h)
 {
   vkDeviceWaitIdle(this->device);
   delete_chain(this);
 
-  return create_swapchain   (this, w, h) &&
-         create_image_views (this) &&
-         create_render_pass (this) &&
-         create_pipeline    (this) &&
-         create_framebuffers(this);
+  return create_swapchain      (this, w, h) &&
+         create_image_views    (this) &&
+         create_render_pass    (this) &&
+         create_pipeline       (this) &&
+         create_framebuffers   (this) &&
+         create_command_buffers(this);
 }
 
 static void delete_chain(struct LGR_Vulkan * this)
 {
+  if (this->commandBuffers)
+  {
+    free(this->commandBuffers);
+    this->commandBuffers = NULL;
+  }
+
+  if (this->commandPool)
+  {
+    vkDestroyCommandPool(this->device, this->commandPool, NULL);
+    this->commandPool = NULL;
+  }
+
   if (this->framebuffers)
   {
     for(uint32_t i = 0; i < this->framebufferCount; ++i)
@@ -994,6 +1010,39 @@ static bool create_framebuffers(struct LGR_Vulkan * this)
       return false;
     }
     ++this->framebufferCount;
+  }
+
+  return true;
+}
+
+static bool create_command_buffers(struct LGR_Vulkan * this)
+{
+  VkCommandPoolCreateInfo poolInfo =
+  {
+    .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+    .queueFamilyIndex = this->queues.graphics,
+    .flags            = 0
+  };
+
+  if (vkCreateCommandPool(this->device, &poolInfo, NULL, &this->commandPool) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Failed to create the command pool");
+    return false;
+  }
+
+  this->commandBuffers = (VkCommandBuffer *)malloc(sizeof(VkCommandBuffer) * this->imageCount);
+  VkCommandBufferAllocateInfo bufferInfo =
+  {
+    .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+    .commandPool        = this->commandPool,
+    .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    .commandBufferCount = this->imageCount
+  };
+
+  if (vkAllocateCommandBuffers(this->device, &bufferInfo, this->commandBuffers) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Failed to allocate the command buffers");
+    return false;
   }
 
   return true;

@@ -23,6 +23,17 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 
 #include "debug.h"
 
+#define VERTEX_SHADER \
+"#version 450"                                                   "\n" \
+""                                                               "\n" \
+"layout (location = 0) out vec2 outUV;"                          "\n" \
+""                                                               "\n" \
+"void main()"                                                    "\n" \
+"{"                                                              "\n" \
+"  outUV = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);" "\n" \
+"  gl_Position = vec4(outUV * 2.0f + -1.0f, 0.0f, 1.0f);"        "\n" \
+"}"
+
 typedef struct QueueIndicies
 {
   int graphics;
@@ -56,6 +67,8 @@ struct LGR_Vulkan
   VkImage         * images;
   VkImageView     * views;
   VkRenderPass      renderPass;
+  VkPipelineLayout  pipelineLayout;
+  VkPipeline        pipeline;
 };
 
 //=============================================================================
@@ -595,6 +608,7 @@ static bool create_logical_device(struct LGR_Vulkan * this)
 static bool create_swapchain  (struct LGR_Vulkan * this, int w, int h);
 static bool create_image_views(struct LGR_Vulkan * this);
 static bool create_render_pass(struct LGR_Vulkan * this);
+static bool create_pipeline   (struct LGR_Vulkan * this);
 
 static bool create_chain(struct LGR_Vulkan * this, int w, int h)
 {
@@ -603,11 +617,24 @@ static bool create_chain(struct LGR_Vulkan * this, int w, int h)
 
   return create_swapchain  (this, w, h) &&
          create_image_views(this) &&
-         create_render_pass(this);
+         create_render_pass(this) &&
+         create_pipeline   (this);
 }
 
 static void delete_chain(struct LGR_Vulkan * this)
 {
+  if (this->pipeline)
+  {
+    vkDestroyPipeline(this->device, this->pipeline, NULL);
+    this->pipeline = NULL;
+  }
+
+  if (this->pipelineLayout)
+  {
+    vkDestroyPipelineLayout(this->device, this->pipelineLayout, NULL);
+    this->pipelineLayout = NULL;
+  }
+
   if (this->renderPass)
   {
     vkDestroyRenderPass(this->device, this->renderPass, NULL);
@@ -778,5 +805,152 @@ static bool create_render_pass(struct LGR_Vulkan * this)
     return false;
   }
 
+  return true;
+}
+
+static inline bool create_shader_module(struct LGR_Vulkan * this, const char * code, const int codeSize, VkShaderModule * shaderModule)
+{
+  VkShaderModuleCreateInfo createInfo =
+  {
+    .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+    .codeSize = codeSize,
+    .pCode    = (const uint32_t*)code
+  };
+
+  return
+    vkCreateShaderModule(this->device, &createInfo, NULL, shaderModule) == VK_SUCCESS;
+}
+
+static bool create_pipeline(struct LGR_Vulkan * this)
+{
+  VkPipelineLayoutCreateInfo pipelineLayoutInfo =
+  {
+    .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+    .setLayoutCount         = 0,
+    .pushConstantRangeCount = 0
+  };
+
+  if (vkCreatePipelineLayout(this->device, &pipelineLayoutInfo, NULL, &this->pipelineLayout) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Failed to create the pipeline layout");
+    return false;
+  }
+
+  VkShaderModule vertexShader;
+  if (!create_shader_module(this, VERTEX_SHADER, sizeof(VERTEX_SHADER), &vertexShader))
+  {
+    DEBUG_ERROR("Failed to create the vertex shader");
+    return false;
+  }
+
+  VkPipelineShaderStageCreateInfo shaderStages[1] =
+  {
+    {
+      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage  = VK_SHADER_STAGE_VERTEX_BIT,
+      .module = vertexShader,
+      .pName  = "main"
+    }
+  };
+
+  VkPipelineVertexInputStateCreateInfo vertexInputState =
+  {
+    .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    .vertexBindingDescriptionCount   = 0,
+    .vertexAttributeDescriptionCount = 0
+  };
+
+  VkPipelineInputAssemblyStateCreateInfo inputAssembly =
+  {
+    .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+    .topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    .primitiveRestartEnable = VK_FALSE
+  };
+
+  VkViewport viewport =
+  {
+    .x        = 0.0f,
+    .y        = 0.0f,
+    .width    = (float)this->extent.width,
+    .height   = (float)this->extent.height,
+    .minDepth = 0.0f,
+    .maxDepth = 1.0f
+  };
+
+  VkRect2D scissor =
+  {
+    .offset = {0, 0},
+    .extent = this->extent
+  };
+
+  VkPipelineViewportStateCreateInfo viewportState =
+  {
+    .sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+    .viewportCount = 1,
+    .pViewports    = &viewport,
+    .scissorCount  = 1,
+    .pScissors     = &scissor
+  };
+
+  VkPipelineRasterizationStateCreateInfo rasterizer =
+  {
+    .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+    .depthClampEnable        = VK_FALSE,
+    .rasterizerDiscardEnable = VK_FALSE,
+    .polygonMode             = VK_POLYGON_MODE_FILL,
+    .lineWidth               = 1.0f,
+    .cullMode                = VK_CULL_MODE_BACK_BIT,
+    .frontFace               = VK_FRONT_FACE_CLOCKWISE,
+    .depthBiasEnable         = VK_FALSE
+  };
+
+  VkPipelineMultisampleStateCreateInfo multisampling =
+  {
+    .sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+    .sampleShadingEnable  = VK_FALSE,
+    .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+  };
+
+  VkPipelineColorBlendAttachmentState colorBlendAttachment =
+  {
+    .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    .blendEnable    = VK_FALSE
+  };
+
+  VkPipelineColorBlendStateCreateInfo colorBlending =
+  {
+    .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+    .logicOpEnable   = VK_FALSE,
+    .logicOp         = VK_LOGIC_OP_COPY,
+    .attachmentCount = 1,
+    .pAttachments    = &colorBlendAttachment,
+    .blendConstants  = {0.0f, 0.0f, 0.0f, 0.0f},
+  };
+
+  VkGraphicsPipelineCreateInfo createInfo =
+  {
+    .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+    .stageCount          = 1,
+    .pStages             = shaderStages,
+    .pVertexInputState   = &vertexInputState,
+    .pInputAssemblyState = &inputAssembly,
+    .pViewportState      = &viewportState,
+    .pRasterizationState = &rasterizer,
+    .pMultisampleState   = &multisampling,
+    .pColorBlendState    = &colorBlending,
+    .layout              = this->pipelineLayout,
+    .renderPass          = this->renderPass,
+    .subpass             = 0,
+    .basePipelineHandle  = VK_NULL_HANDLE
+  };
+
+  if (vkCreateGraphicsPipelines(this->device, VK_NULL_HANDLE, 1, &createInfo, NULL, &this->pipeline) != VK_SUCCESS)
+  {
+    vkDestroyShaderModule(this->device, vertexShader, NULL);
+    DEBUG_ERROR("Failed to create the graphics pipeline");
+    return false;
+  }
+
+  vkDestroyShaderModule(this->device, vertexShader, NULL);
   return true;
 }

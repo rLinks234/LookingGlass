@@ -22,6 +22,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <SDL2/SDL_syswm.h>
 
 #include "debug.h"
+#include "memcpySSE.h"
 
 #define VERTEX_SHADER \
 "#version 450"                                                   "\n" \
@@ -57,6 +58,8 @@ struct LGR_Vulkan
   VkPresentModeKHR  presentMode;
 
   VkPhysicalDevice  physicalDevice;
+  VkPhysicalDeviceMemoryProperties memProperties;
+
   QueueIndicies     queues;
   VkQueue           graphics_q;
   VkQueue           present_q;
@@ -76,6 +79,13 @@ struct LGR_Vulkan
   VkCommandBuffer * commandBuffers;
   VkSemaphore       semImageAvailable;
   VkSemaphore       semRenderFinished;
+
+  VkBuffer          texLocalBuffer;
+  VkDeviceMemory    texLocalMemory;
+  VkDeviceMemory    texGPUMemory;
+  uint8_t         * texBufferMap;
+  VkImage           texImage;
+  VkImageView       texImageView;
 };
 
 //=============================================================================
@@ -90,6 +100,8 @@ static bool create_logical_device(struct LGR_Vulkan * this);
 static bool create_chain         (struct LGR_Vulkan * this, int w, int h);
 static void delete_chain         (struct LGR_Vulkan * this);
 static bool recreate_chain       (struct LGR_Vulkan * this, int w, int h);
+static bool start_single_command (struct LGR_Vulkan * this, VkCommandBuffer * comBuffer);
+static bool end_single_command   (struct LGR_Vulkan * this, VkCommandBuffer comBuffer);
 
 const char * lgr_vulkan_get_name()
 {
@@ -226,6 +238,57 @@ bool lgr_vulkan_on_frame_event(void * opaque, const uint8_t * data)
   if (!this || !this->configured)
     return false;
 
+  // copy the data into the local buffer map
+  // TODO: we might be able to avoid this copy with Vulkan
+  // I am still learning the API
+  const size_t size = this->format.height * this->format.pitch;
+  memcpySSE
+  (
+    this->texBufferMap,
+    data,
+    size
+  );
+
+  // start a command buffer
+  // TODO: not sure if we can reuse a command buffer instead of creating a new
+  // one each time
+  VkCommandBuffer comBuffer;
+  if (!start_single_command(this, &comBuffer))
+  {
+    DEBUG_ERROR("Failed to start the copy command");
+    return false;
+  }
+
+  // setup to copy the local buffer into the image in GPU ram
+  VkBufferImageCopy region =
+  {
+    .bufferOffset      = 0,
+    .bufferRowLength   = this->format.stride,
+    .bufferImageHeight = this->format.height,
+    .imageSubresource  =
+    {
+      .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+      .mipLevel       = 0,
+      .baseArrayLayer = 0,
+      .layerCount     = 1
+    },
+    .imageOffset       = {0, 0, 0},
+    .imageExtent       = {this->format.width, this->format.height, 1}
+  };
+
+  // perform the copy
+  vkCmdCopyBufferToImage
+  (
+    comBuffer,
+    this->texLocalBuffer,
+    this->texImage,
+    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    1,
+    &region
+  );
+
+  // end the command
+  end_single_command(this, comBuffer);
   return true;
 }
 
@@ -654,6 +717,7 @@ static bool pick_physical_device(struct LGR_Vulkan * this)
     return false;
   }
 
+  vkGetPhysicalDeviceMemoryProperties(this->physicalDevice, &this->memProperties);
   return true;
 }
 
@@ -710,6 +774,11 @@ static bool create_logical_device(struct LGR_Vulkan * this)
 
 static void reset_swap_chain      (struct LGR_Vulkan * this);
 static bool create_swap_chain     (struct LGR_Vulkan * this, int w, int h);
+static bool create_image_view     (struct LGR_Vulkan * this,
+  VkFormat      format,
+  VkImage       image,
+  VkImageView * imageView
+);
 static bool create_image_views    (struct LGR_Vulkan * this);
 static bool create_render_pass    (struct LGR_Vulkan * this);
 static bool create_pipeline       (struct LGR_Vulkan * this);
@@ -717,6 +786,25 @@ static bool create_framebuffers   (struct LGR_Vulkan * this);
 static bool create_command_pool   (struct LGR_Vulkan * this);
 static bool create_command_buffers(struct LGR_Vulkan * this);
 static bool create_semaphores     (struct LGR_Vulkan * this);
+static bool find_memory_type      (struct LGR_Vulkan * this,
+  uint32_t                typeFilter,
+  VkMemoryPropertyFlags   properties,
+  uint32_t              * typeIndex
+);
+static bool create_buffer         (struct LGR_Vulkan * this,
+  VkDeviceSize            size,
+  VkBufferUsageFlags      usage,
+  VkMemoryPropertyFlags   properties,
+  VkBuffer              * buffer,
+  VkDeviceMemory        * bufferMemory
+);
+static void destroy_buffer        (struct LGR_Vulkan * this,
+  VkBuffer       * buffer,
+  VkDeviceMemory * bufferMemory
+);
+static bool create_tex_buffers    (struct LGR_Vulkan * this);
+static bool create_tex_images     (struct LGR_Vulkan * this);
+static bool create_tex_image_views(struct LGR_Vulkan * this);
 
 static bool create_chain(struct LGR_Vulkan * this, int w, int h)
 {
@@ -728,7 +816,10 @@ static bool create_chain(struct LGR_Vulkan * this, int w, int h)
     create_framebuffers   (this) &&
     create_command_pool   (this) &&
     create_command_buffers(this) &&
-    create_semaphores     (this);
+    create_semaphores     (this) &&
+    create_tex_buffers    (this) &&
+    create_tex_images     (this) &&
+    create_tex_image_views(this);
 
   return this->chainCreated;
 }
@@ -755,6 +846,34 @@ static void delete_chain(struct LGR_Vulkan * this)
     return;
 
   vkDeviceWaitIdle(this->device);
+
+  if (this->texImageView)
+  {
+    vkDestroyImageView(this->device, this->texImageView, NULL);
+    this->texImageView = NULL;
+  }
+
+  if (this->texImage)
+  {
+    vkDestroyImage(this->device, this->texImage, NULL);
+    this->texImage = NULL;
+  }
+
+  if (this->texBufferMap)
+  {
+    vkUnmapMemory(this->device, this->texLocalMemory);
+    this->texBufferMap = NULL;
+  }
+
+  if (this->texGPUMemory)
+  {
+    vkFreeMemory(this->device, this->texGPUMemory, NULL);
+    this->texGPUMemory = NULL;
+  }
+
+  if (this->texLocalBuffer)
+    destroy_buffer(this, &this->texLocalBuffer, &this->texLocalMemory);
+
   reset_swap_chain(this);
 
   if (this->semRenderFinished)
@@ -909,29 +1028,46 @@ static bool create_swap_chain(struct LGR_Vulkan * this, int w, int h)
   return true;
 }
 
-static bool create_image_views(struct LGR_Vulkan * this)
+static bool create_image_view(struct LGR_Vulkan * this, VkFormat format, VkImage image, VkImageView * imageView)
 {
   VkImageViewCreateInfo createInfo =
   {
-    .sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-    .viewType                        = VK_IMAGE_VIEW_TYPE_2D,
-    .format                          = VK_FORMAT_B8G8R8A8_UNORM,
-    .components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY,
-    .components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY,
-    .components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY,
-    .components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY,
-    .subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-    .subresourceRange.baseMipLevel   = 0,
-    .subresourceRange.levelCount     = 1,
-    .subresourceRange.baseArrayLayer = 0,
-    .subresourceRange.layerCount     = 1,
+    .sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+    .image      = image,
+    .viewType   = VK_IMAGE_VIEW_TYPE_2D,
+    .format     = format,
+    .components =
+    {
+      .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+      .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+      .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+      .a = VK_COMPONENT_SWIZZLE_IDENTITY
+    },
+    .subresourceRange =
+    {
+      .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+      .baseMipLevel   = 0,
+      .levelCount     = 1,
+      .baseArrayLayer = 0,
+      .layerCount     = 1
+    }
   };
 
+  if (vkCreateImageView(this->device, &createInfo, NULL, imageView) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Failed to create texutre image view");
+    return false;
+  }
+
+  return true;
+
+}
+
+static bool create_image_views(struct LGR_Vulkan * this)
+{
   this->views = (VkImageView *)malloc(sizeof(VkImageView) * this->imageCount);
   for(uint32_t i = 0; i < this->imageCount; ++i)
-  {
-    createInfo.image = this->images[i];
-    if (vkCreateImageView(this->device, &createInfo, NULL, &this->views[i]) != VK_SUCCESS)
+    if (!create_image_view(this, VK_FORMAT_B8G8R8A8_UNORM, this->images[i], &this->views[i]))
     {
       DEBUG_ERROR("failed to create image views");
       for(uint32_t a = 0; a < i; ++a)
@@ -940,7 +1076,6 @@ static bool create_image_views(struct LGR_Vulkan * this)
       this->views = NULL;
       return false;
     }
-  }
 
   return true;
 }
@@ -1258,4 +1393,253 @@ static bool create_semaphores(struct LGR_Vulkan * this)
   }
 
   return true;
+}
+
+static bool start_single_command(struct LGR_Vulkan * this, VkCommandBuffer * comBuffer)
+{
+  VkCommandBufferAllocateInfo allocInfo =
+  {
+    .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+    .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    .commandPool        = this->commandPool,
+    .commandBufferCount = 1
+  };
+
+  if (vkAllocateCommandBuffers(this->device, &allocInfo, comBuffer) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Failed to allocate a command buffer");
+    return false;
+  }
+
+  VkCommandBufferBeginInfo info =
+  {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+  };
+
+  if (vkBeginCommandBuffer(*comBuffer, &info) != VK_SUCCESS)
+  {
+    vkFreeCommandBuffers(this->device, this->commandPool, 1, comBuffer);
+    DEBUG_ERROR("Failed to begin a command buffer");
+    return false;
+  }
+
+  return true;
+}
+
+static bool end_single_command(struct LGR_Vulkan * this, VkCommandBuffer comBuffer)
+{
+  vkEndCommandBuffer(comBuffer);
+
+  VkSubmitInfo info =
+  {
+    .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+    .commandBufferCount = 1,
+    .pCommandBuffers    = &comBuffer
+  };
+
+  bool status = true;
+  if (vkQueueSubmit(this->graphics_q, 1, &info, VK_NULL_HANDLE) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Failed to submit command buffer to queue");
+    status = false;
+  }
+  else
+    vkQueueWaitIdle(this->graphics_q);
+
+  vkFreeCommandBuffers(this->device, this->commandPool, 1, &comBuffer);
+  return status;
+}
+
+static bool find_memory_type(
+  struct LGR_Vulkan     * this,
+  uint32_t                typeFilter,
+  VkMemoryPropertyFlags   properties,
+  uint32_t              * typeIndex
+)
+{
+  for(uint32_t i = 0; i < this->memProperties.memoryTypeCount; ++i)
+    if ((typeFilter & (1 << i)) &&
+        (this->memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+    {
+      *typeIndex = i;
+      return true;
+    }
+
+  return false;
+}
+
+static bool create_buffer(
+    struct LGR_Vulkan     * this,
+    VkDeviceSize            size,
+    VkBufferUsageFlags      usage,
+    VkMemoryPropertyFlags   properties,
+    VkBuffer              * buffer,
+    VkDeviceMemory        * bufferMemory
+)
+{
+  VkBufferCreateInfo bufferInfo =
+  {
+    .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+    .size        = size,
+    .usage       = usage,
+    .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+  };
+
+  if (vkCreateBuffer(this->device, &bufferInfo, NULL, buffer) != VK_SUCCESS)
+  {
+    DEBUG_INFO("Failed to create a buffer");
+    return false;
+  }
+
+  VkMemoryRequirements memReq;
+  vkGetBufferMemoryRequirements(this->device, *buffer, &memReq);
+
+  VkMemoryAllocateInfo allocInfo =
+  {
+    .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+    .allocationSize  = memReq.size
+  };
+
+  if (!find_memory_type(this,
+    memReq.memoryTypeBits,
+    properties,
+    &allocInfo.memoryTypeIndex)
+  )
+  {
+    DEBUG_ERROR("Unable to locate a suitable memory type");
+    return false;
+  }
+
+  if (vkAllocateMemory(this->device, &allocInfo, NULL, bufferMemory) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Failed to allocate buffer memory");
+    return false;
+  }
+
+  DEBUG_INFO("Allocate: size=%lu, real=%lu, typeIndex=%u, addr=%p",
+      size, memReq.size, allocInfo.memoryTypeIndex, bufferMemory);
+
+  vkBindBufferMemory(this->device, *buffer, *bufferMemory, 0);
+  return true;
+}
+
+static void destroy_buffer(
+  struct LGR_Vulkan * this,
+  VkBuffer          * buffer,
+  VkDeviceMemory    * bufferMemory
+)
+{
+  DEBUG_INFO("Destroy: addr=%p", bufferMemory);
+  vkDestroyBuffer(this->device, *buffer      , NULL);
+  vkFreeMemory   (this->device, *bufferMemory, NULL);
+  *buffer       = NULL;
+  *bufferMemory = NULL;
+}
+
+#if 0
+static bool copy_buffer(struct LGR_Vulkan * this, VkBuffer dst, VkBuffer src, VkDeviceSize size)
+{
+  VkCommandBuffer comBuf;
+  if (!start_single_command(this, &comBuf))
+  {
+    DEBUG_ERROR("Failed to start single time command");
+    return false;
+  }
+
+  VkBufferCopy region = { .size = size };
+  vkCmdCopyBuffer(comBuf, src, dst, 1, &region);
+
+  end_single_command(this, comBuf);
+}
+#endif
+
+static bool create_tex_buffers(struct LGR_Vulkan * this)
+{
+  const VkDeviceSize size = this->format.height * this->format.pitch;
+  if (!create_buffer(
+    this,
+    size,
+    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    &this->texLocalBuffer,
+    &this->texLocalMemory
+  ))
+  {
+    DEBUG_ERROR("Failed to create local texture buffer");
+    return false;
+  }
+
+  vkMapMemory(
+    this->device,
+    this->texLocalMemory,
+    0,
+    size,
+    0,
+    (void *)&this->texBufferMap
+  );
+  return true;
+}
+
+static bool create_tex_images(struct LGR_Vulkan * this)
+{
+  VkImageCreateInfo imageInfo =
+  {
+    .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+    .imageType     = VK_IMAGE_TYPE_2D,
+    .extent        =
+    {
+      .width  = this->format.width,
+      .height = this->format.height,
+      .depth  = 1
+    },
+    .mipLevels     = 1,
+    .arrayLayers   = 1,
+    .format        = VK_FORMAT_R8G8B8A8_UNORM,
+    .tiling        = VK_IMAGE_TILING_OPTIMAL,
+    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    .usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+    .samples       = VK_SAMPLE_COUNT_1_BIT,
+    .sharingMode   = VK_SHARING_MODE_EXCLUSIVE
+  };
+
+  if (vkCreateImage(this->device, &imageInfo, NULL, &this->texImage) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Failed to create the image");
+    return false;
+  }
+
+  VkMemoryRequirements memReq;
+  vkGetImageMemoryRequirements(this->device, this->texImage, &memReq);
+
+  VkMemoryAllocateInfo allocInfo =
+  {
+    .sType          = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+    .allocationSize = memReq.size
+  };
+
+  if (!find_memory_type(
+    this,
+    memReq.memoryTypeBits,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+    &allocInfo.memoryTypeIndex)
+  )
+  {
+    DEBUG_ERROR("Failed to find a suitable memory type");
+    return false;
+  }
+
+  if (vkAllocateMemory(this->device, &allocInfo, NULL, &this->texGPUMemory) != VK_SUCCESS)
+  {
+    DEBUG_ERROR("Failed to allocate image memory");
+    return false;
+  }
+
+  vkBindImageMemory(this->device, this->texImage, this->texGPUMemory, 0);
+  return true;
+}
+
+static bool create_tex_image_views(struct LGR_Vulkan * this)
+{
+  return create_image_view(this, VK_FORMAT_R8G8B8A8_UNORM, this->texImage, &this->texImageView);
 }

@@ -141,3 +141,6 @@ LG_Renderer;
 // generic option helpers
 bool LG_RendererValidatorBool(const char * value);
 bool LG_RendererValueToBool  (const char * value);
+
+// Enumerates over all glX visuals to find if multisampling is supported
+int LG_RendererQueryMultisamplingSupport(void);
